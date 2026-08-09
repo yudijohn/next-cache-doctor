@@ -55,11 +55,11 @@ function nodeName(node) {
  * Stops descending into nested functions that declare their OWN
  * 'use cache' directive, since those are independent cache scopes.
  */
-function collectSignals(root, sourceFile) {
+function collectSignals(root, sourceFile, helpers) {
   const signals = {
     hasCacheLife: false,
     hasCacheTag: false,
-    dynamicApiCalls: [], // { name, line }
+    dynamicApiCalls: [], // { name, line, viaChain? }
     searchParamsRefs: [], // { line }
   };
 
@@ -83,6 +83,16 @@ function collectSignals(root, sourceFile) {
       if (callee === 'cookies' || callee === 'headers') {
         const { line } = sourceFile.getLineAndCharacterOfPosition(node.getStart());
         signals.dynamicApiCalls.push({ name: callee, line: line + 1 });
+      } else if (helpers.has(callee)) {
+        const result = bodyTouchesDynamicApi(helpers.get(callee), helpers, new Set([callee]));
+        if (result) {
+          const { line } = sourceFile.getLineAndCharacterOfPosition(node.getStart());
+          signals.dynamicApiCalls.push({
+            name: result.api,
+            line: line + 1,
+            viaChain: [callee, ...result.viaChain],
+          });
+        }
       }
     }
 
@@ -122,6 +132,85 @@ function isFunctionLike(node) {
 }
 
 /**
+ * Collects top-level (module-scope) named functions declared in this file,
+ * mapped to their body node. Skips functions that open their OWN 'use cache'
+ * directive - those manage their own caching and are validated separately,
+ * so calling them from another cache scope is not itself a leak signal.
+ */
+function collectTopLevelHelpers(sourceFile) {
+  const helpers = new Map();
+
+  function bodyOpensOwnCacheDirective(body) {
+    return ts.isBlock(body) && !!getLeadingCacheDirective(body.statements);
+  }
+
+  for (const stmt of sourceFile.statements) {
+    if (ts.isFunctionDeclaration(stmt) && stmt.name && stmt.body) {
+      if (!bodyOpensOwnCacheDirective(stmt.body)) {
+        helpers.set(stmt.name.text, stmt.body);
+      }
+    } else if (ts.isVariableStatement(stmt)) {
+      for (const decl of stmt.declarationList.declarations) {
+        if (
+          decl.name &&
+          ts.isIdentifier(decl.name) &&
+          decl.initializer &&
+          (ts.isArrowFunction(decl.initializer) || ts.isFunctionExpression(decl.initializer)) &&
+          decl.initializer.body
+        ) {
+          const body = decl.initializer.body;
+          if (!(ts.isBlock(body) && bodyOpensOwnCacheDirective(body))) {
+            helpers.set(decl.name.text, body);
+          }
+        }
+      }
+    }
+  }
+  return helpers;
+}
+
+/**
+ * Walks a function body (Block or expression body) looking for a call to
+ * cookies()/headers(), a reference to `searchParams`, or a call to another
+ * known helper that itself (transitively) touches one of those. Returns
+ * `{ api, viaChain }` describing what was found and the chain of helper
+ * names that led to it, or `null` if the body is clean.
+ */
+function bodyTouchesDynamicApi(bodyNode, helpers, visited) {
+  let found = null;
+
+  function visit(node) {
+    if (found) return;
+
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)) {
+      const callee = node.expression.text;
+      if (callee === 'cookies' || callee === 'headers') {
+        found = { api: callee, viaChain: [] };
+        return;
+      }
+      if (helpers.has(callee) && !visited.has(callee)) {
+        visited.add(callee);
+        const nested = bodyTouchesDynamicApi(helpers.get(callee), helpers, visited);
+        if (nested) {
+          found = { api: nested.api, viaChain: [callee, ...nested.viaChain] };
+          return;
+        }
+      }
+    }
+
+    if (ts.isIdentifier(node) && node.text === 'searchParams' && !isDeclarationName(node)) {
+      found = { api: 'searchParams', viaChain: [] };
+      return;
+    }
+
+    if (!found) ts.forEachChild(node, visit);
+  }
+
+  visit(bodyNode);
+  return found;
+}
+
+/**
  * Scans one file's source text and returns a list of findings.
  * Each finding: { file, line, rule, severity, message }
  */
@@ -135,13 +224,30 @@ function scanSource(filePath, sourceText) {
     filePath.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS
   );
 
-  function checkScope(root, kind, name, line) {
-    const signals = collectSignals(root, sourceFile);
+  const helpers = collectTopLevelHelpers(sourceFile);
+
+  function computeCacheLifeFix(statements) {
+    const directiveStmt = statements[0];
+    if (!directiveStmt) return null;
+    const startPos = directiveStmt.getStart();
+    const endPos = directiveStmt.getEnd();
+    const { character: indent } = sourceFile.getLineAndCharacterOfPosition(startPos);
+    return {
+      insertPos: endPos,
+      insertText: `\n${' '.repeat(indent)}cacheLife('minutes');`,
+    };
+  }
+
+  function checkScope(root, kind, name, line, statements) {
+    const signals = collectSignals(root, sourceFile, helpers);
     const ctx = { kind, name, line, signals };
 
     for (const rule of rules) {
       const finding = rule.check(ctx);
       if (finding) {
+        if (finding.fixable) {
+          finding.fix = computeCacheLifeFix(statements);
+        }
         findings.push({ file: filePath, ...finding });
       }
     }
@@ -150,7 +256,7 @@ function scanSource(filePath, sourceText) {
   // 1) File-level directive (rare, but valid - applies to the whole module).
   const fileKind = getLeadingCacheDirective(sourceFile.statements);
   if (fileKind) {
-    checkScope(sourceFile, fileKind, `${filePath} (module scope)`, 1);
+    checkScope(sourceFile, fileKind, `${filePath} (module scope)`, 1, sourceFile.statements);
   }
 
   // 2) Function/component-level directives.
@@ -159,7 +265,7 @@ function scanSource(filePath, sourceText) {
       const kind = getLeadingCacheDirective(node.body.statements);
       if (kind) {
         const { line } = sourceFile.getLineAndCharacterOfPosition(node.getStart());
-        checkScope(node, kind, nodeName(node), line + 1);
+        checkScope(node, kind, nodeName(node), line + 1, node.body.statements);
       }
     }
     ts.forEachChild(node, visitTop);

@@ -20,6 +20,7 @@ function check({ kind, name, line, signals }) {
     line,
     scopeName: name,
     kind,
+    fixable: true,
     message: `'${kind}' scope "${name}" has no explicit cacheLife(...). The default profile will apply implicitly - add cacheLife() to make the duration explicit at the call site.`,
   };
 }

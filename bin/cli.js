@@ -4,6 +4,7 @@
 const { Command } = require('commander');
 const chalk = require('chalk');
 const { runScan } = require('../src/index');
+const { applyFixes } = require('../src/fixer');
 const pkg = require('../package.json');
 
 const program = new Command();
@@ -21,9 +22,39 @@ program
   .argument('[path]', 'directory to scan', '.')
   .option('--json', 'output raw JSON instead of a formatted report')
   .option('--fail-on <level>', "exit non-zero if findings of this severity exist: 'error' or 'warning'", 'error')
+  .option('--fix', "automatically apply safe fixes (currently: inserts a cacheLife('minutes') stub for missing-cache-life findings)")
   .action(async (targetPath, options) => {
     try {
       const { findings, filesScanned, filesWithCache } = await runScan(targetPath);
+
+      if (options.fix) {
+        const { filesFixed, insertionsApplied } = applyFixes(targetPath, findings);
+        if (insertionsApplied > 0) {
+          console.log(
+            chalk.green(
+              `\n✓ Applied ${insertionsApplied} fix(es) across ${filesFixed.length} file(s):`
+            )
+          );
+          filesFixed.forEach((f) => console.log(chalk.dim(`  - ${f}`)));
+          console.log(
+            chalk.yellow(
+              "  Note: verify 'cacheLife' is imported from 'next/cache' in these files, and adjust the inserted duration - 'minutes' is a placeholder.\n"
+            )
+          );
+        } else {
+          console.log(chalk.dim('\nNo auto-fixable findings.\n'));
+        }
+        // Re-scan so the printed report reflects the post-fix state.
+        const rescanned = await runScan(targetPath);
+        if (options.json) {
+          console.log(JSON.stringify(rescanned, null, 2));
+        } else {
+          printReport(rescanned.findings, rescanned.filesScanned, rescanned.filesWithCache);
+        }
+        const errCount = rescanned.findings.filter((f) => f.severity === 'error').length;
+        if (errCount > 0) process.exitCode = 1;
+        return;
+      }
 
       if (options.json) {
         console.log(JSON.stringify({ findings, filesScanned, filesWithCache }, null, 2));
@@ -66,7 +97,9 @@ function printReport(findings, filesScanned, filesWithCache) {
       const badge =
         item.severity === 'error'
           ? chalk.bgRed.black(' ERROR ')
-          : chalk.bgYellow.black(' WARN  ');
+          : item.severity === 'warning'
+          ? chalk.bgYellow.black(' WARN  ')
+          : chalk.bgCyan.black(' INFO  ');
       console.log(`  ${badge} ${chalk.dim(`L${item.line}`)}  ${chalk.dim(`[${item.rule}]`)}`);
       console.log(`         ${item.message}`);
     }
@@ -75,9 +108,10 @@ function printReport(findings, filesScanned, filesWithCache) {
 
   const errorCount = findings.filter((f) => f.severity === 'error').length;
   const warningCount = findings.filter((f) => f.severity === 'warning').length;
+  const infoCount = findings.filter((f) => f.severity === 'info').length;
   console.log(
     chalk.bold(
-      `${errorCount} error(s), ${warningCount} warning(s) across ${Object.keys(byFile).length} file(s).`
+      `${errorCount} error(s), ${warningCount} warning(s), ${infoCount} info across ${Object.keys(byFile).length} file(s).`
     )
   );
   console.log('');

@@ -12,18 +12,26 @@
 const id = 'possible-private-data-leak';
 const severity = 'error';
 
+function formatChain(viaChain) {
+  return viaChain.map((n) => `${n}()`).join(' → ');
+}
+
 function check({ kind, name, signals }) {
   if (kind === 'use cache: private') return null;
 
   const dynamicHit = signals.dynamicApiCalls[0];
   if (dynamicHit) {
+    const message =
+      dynamicHit.viaChain && dynamicHit.viaChain.length > 0
+        ? `"${name}" is cached with plain 'use cache' but calls ${formatChain(dynamicHit.viaChain)}, which internally calls ${dynamicHit.name}(). This can leak per-user data across users. Use 'use cache: private', or refactor to pass the value in as an argument instead.`
+        : `"${name}" is cached with plain 'use cache' but calls ${dynamicHit.name}() inside the cached scope. This can leak per-user data across users. Use 'use cache: private', or refactor to pass the value in as an argument instead.`;
     return {
       rule: id,
       severity,
       line: dynamicHit.line,
       scopeName: name,
       kind,
-      message: `"${name}" is cached with plain 'use cache' but calls ${dynamicHit.name}() inside the cached scope. This can leak per-user data across users. Use 'use cache: private', or refactor to pass the value in as an argument instead.`,
+      message,
     };
   }
 

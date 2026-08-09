@@ -10,7 +10,8 @@
  */
 const missingCacheLife = require('./missing-cache-life');
 const privateDataLeak = require('./private-data-leak');
+const missingCacheTag = require('./missing-cache-tag');
 
-const rules = [missingCacheLife, privateDataLeak];
+const rules = [missingCacheLife, privateDataLeak, missingCacheTag];
 
 module.exports = { rules };
