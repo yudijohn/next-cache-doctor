@@ -1,3 +1,8 @@
+[![npm version](https://img.shields.io/npm/v/next-cache-doctor.svg)](https://www.npmjs.com/package/next-cache-doctor)
+[![CI](https://github.com/yudijohn/next-cache-doctor/actions/workflows/ci.yml/badge.svg)](https://github.com/yudijohn/next-cache-doctor/actions/workflows/ci.yml)
+[![npm downloads](https://img.shields.io/npm/dm/next-cache-doctor.svg)](https://www.npmjs.com/package/next-cache-doctor)
+[![license](https://img.shields.io/npm/l/next-cache-doctor.svg)](https://github.com/yudijohn/next-cache-doctor/blob/main/LICENSE)
+
 # next-cache-doctor
 
 Static analysis CLI for Next.js's `'use cache'` directive (Next.js 15.2+ / 16 Cache Components).
