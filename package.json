@@ -1,0 +1,52 @@
+{
+  "name": "next-cache-doctor",
+  "version": "0.1.0",
+  "description": "Static analysis CLI for Next.js 'use cache' directive: catches missing cacheLife, potential private-data leaks in cached scopes, and missing cacheTag before they hit production.",
+  "type": "commonjs",
+  "main": "src/index.js",
+  "bin": {
+    "next-cache-doctor": "./bin/cli.js"
+  },
+  "files": [
+    "bin",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test",
+    "lint:self": "node bin/cli.js scan test-fixtures"
+  },
+  "keywords": [
+    "nextjs",
+    "next.js",
+    "use-cache",
+    "cache",
+    "cacheLife",
+    "cacheTag",
+    "lint",
+    "static-analysis",
+    "cli",
+    "devtools",
+    "app-router"
+  ],
+  "author": "yudijohn",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "chalk": "^4.1.2",
+    "commander": "^12.1.0",
+    "fast-glob": "^3.3.2",
+    "typescript": "5.6.3"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yudijohn/next-cache-doctor.git"
+  },
+  "homepage": "https://github.com/yudijohn/next-cache-doctor#readme",
+  "bugs": {
+    "url": "https://github.com/yudijohn/next-cache-doctor/issues"
+  }
+}
