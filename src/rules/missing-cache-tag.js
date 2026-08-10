@@ -21,6 +21,7 @@ function check({ kind, name, line, signals }) {
     line,
     scopeName: name,
     kind,
+    fixable: true,
     message: `'${kind}' scope "${name}" has no cacheTag(...). Without a tag you can only invalidate this cache by waiting for cacheLife to expire, not on-demand via revalidateTag(). Consider adding cacheTag() if this data can change from elsewhere in the app.`,
   };
 }

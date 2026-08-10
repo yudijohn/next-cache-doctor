@@ -79,11 +79,15 @@ Exit code is `1` if any error-level finding exists (or warning-level too, with `
 |---|---|---|
 | `missing-cache-life` | warning | A `'use cache'` scope with no `cacheLife(...)` call, so the duration is left implicit. Auto-fixable with `--fix`. |
 | `possible-private-data-leak` | error | A plain `'use cache'` scope (not `'use cache: private'`) that calls `cookies()`, `headers()`, or reads `searchParams` — directly, or through a same-file helper function it calls. |
-| `missing-cache-tag` | info | A `'use cache'` scope with no `cacheTag(...)`, so it can only be invalidated by waiting for expiry, not on-demand. |
+| `missing-cache-tag` | info | A `'use cache'` scope with no `cacheTag(...)`, so it can only be invalidated by waiting for expiry, not on-demand. Auto-fixable with `--fix`. |
 
 ## `--fix`
 
-Currently auto-fixes `missing-cache-life` by inserting a `cacheLife('minutes')` stub right after the directive. It's a starting point, not a final answer — always review the diff and pick the duration that actually fits your data:
+Currently auto-fixes:
+- `missing-cache-life` — inserts a `cacheLife('minutes')` stub
+- `missing-cache-tag` — inserts a `cacheTag(...)` call with a name suggested from the function/file name (e.g. `getUserDashboard` → `'get-user-dashboard'`)
+
+Both are starting points, not final answers — always review the diff and pick the duration/tag name that actually fits your data and invalidation strategy:
 
 ```
 npx next-cache-doctor scan . --fix
@@ -98,14 +102,13 @@ npx next-cache-doctor scan . --fix
 - Detection is name-based: it looks for calls to identifiers literally named `cacheLife`, `cacheTag`, `cookies`, `headers`. Re-exporting these under a different name will not be detected.
 - Helper-function tracing only follows functions declared in the **same file**. A helper imported from another module is not traced yet.
 - A helper function that itself opens its own `'use cache'`/`'use cache: private'` scope is treated as independently validated and is not traced into — which is correct, since it manages its own caching.
-- `--fix` only handles the `missing-cache-life` case so far.
+- `--fix` covers `missing-cache-life` and `missing-cache-tag`. Suggested tag names are a starting point (derived from the function/file name) - rename them to match your actual invalidation strategy.
 
 Contributions and bug reports are very welcome.
 
 ## Roadmap
 
 - Trace helper functions across file/module boundaries, not just same-file
-- `--fix` support for `missing-cache-tag` (insert a reasonable tag suggestion)
 - VS Code extension / inline devtools overlay showing cache boundaries at dev time
 
 ## License

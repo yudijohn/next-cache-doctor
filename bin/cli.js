@@ -28,6 +28,7 @@ program
       const { findings, filesScanned, filesWithCache } = await runScan(targetPath);
 
       if (options.fix) {
+        const fixableFindings = findings.filter((f) => f.fix);
         const { filesFixed, insertionsApplied } = applyFixes(targetPath, findings);
         if (insertionsApplied > 0) {
           console.log(
@@ -36,11 +37,20 @@ program
             )
           );
           filesFixed.forEach((f) => console.log(chalk.dim(`  - ${f}`)));
-          console.log(
-            chalk.yellow(
-              "  Note: verify 'cacheLife' is imported from 'next/cache' in these files, and adjust the inserted duration - 'minutes' is a placeholder.\n"
-            )
-          );
+
+          const fixedRules = new Set(fixableFindings.map((f) => f.rule));
+          const hints = [];
+          if (fixedRules.has('missing-cache-life')) {
+            hints.push("verify 'cacheLife' is imported from 'next/cache', and pick a real duration - 'minutes' is a placeholder");
+          }
+          if (fixedRules.has('missing-cache-tag')) {
+            hints.push("verify 'cacheTag' is imported from 'next/cache', and check the suggested tag name makes sense for your invalidation strategy");
+          }
+          if (hints.length > 0) {
+            console.log(chalk.yellow(`  Note: ${hints.join('; ')}.\n`));
+          } else {
+            console.log('');
+          }
         } else {
           console.log(chalk.dim('\nNo auto-fixable findings.\n'));
         }

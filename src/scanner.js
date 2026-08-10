@@ -226,27 +226,43 @@ function scanSource(filePath, sourceText) {
 
   const helpers = collectTopLevelHelpers(sourceFile);
 
-  function computeCacheLifeFix(statements) {
+  /** Shared insertion point: right after the directive prologue statement. */
+  function directiveInsertionPoint(statements) {
     const directiveStmt = statements[0];
     if (!directiveStmt) return null;
-    const startPos = directiveStmt.getStart();
-    const endPos = directiveStmt.getEnd();
-    const { character: indent } = sourceFile.getLineAndCharacterOfPosition(startPos);
-    return {
-      insertPos: endPos,
-      insertText: `\n${' '.repeat(indent)}cacheLife('minutes');`,
-    };
+    const { character: indent } = sourceFile.getLineAndCharacterOfPosition(directiveStmt.getStart());
+    return { insertPos: directiveStmt.getEnd(), indent };
   }
 
-  function checkScope(root, kind, name, line, statements) {
+  function computeCacheLifeFix(statements) {
+    const point = directiveInsertionPoint(statements);
+    if (!point) return null;
+    return { insertPos: point.insertPos, insertText: `\n${' '.repeat(point.indent)}cacheLife('minutes');` };
+  }
+
+  function computeCacheTagFix(statements, tagHint) {
+    const point = directiveInsertionPoint(statements);
+    if (!point) return null;
+    return { insertPos: point.insertPos, insertText: `\n${' '.repeat(point.indent)}cacheTag('${tagHint}');` };
+  }
+
+  // Dispatch table: which fix computer to use for a given rule id. Rules
+  // that add a `fixable: true` finding without an entry here simply won't
+  // get a `.fix` attached (the CLI will report them but --fix will skip them).
+  const fixComputers = {
+    'missing-cache-life': (statements) => computeCacheLifeFix(statements),
+    'missing-cache-tag': (statements, tagHint) => computeCacheTagFix(statements, tagHint),
+  };
+
+  function checkScope(root, kind, name, line, statements, tagHint) {
     const signals = collectSignals(root, sourceFile, helpers);
     const ctx = { kind, name, line, signals };
 
     for (const rule of rules) {
       const finding = rule.check(ctx);
       if (finding) {
-        if (finding.fixable) {
-          finding.fix = computeCacheLifeFix(statements);
+        if (finding.fixable && fixComputers[finding.rule]) {
+          finding.fix = fixComputers[finding.rule](statements, tagHint);
         }
         findings.push({ file: filePath, ...finding });
       }
@@ -256,7 +272,8 @@ function scanSource(filePath, sourceText) {
   // 1) File-level directive (rare, but valid - applies to the whole module).
   const fileKind = getLeadingCacheDirective(sourceFile.statements);
   if (fileKind) {
-    checkScope(sourceFile, fileKind, `${filePath} (module scope)`, 1, sourceFile.statements);
+    const fileTagHint = slugify(filePath.split('/').pop().replace(/\.(tsx?|jsx?)$/, ''));
+    checkScope(sourceFile, fileKind, `${filePath} (module scope)`, 1, sourceFile.statements, fileTagHint);
   }
 
   // 2) Function/component-level directives.
@@ -265,7 +282,8 @@ function scanSource(filePath, sourceText) {
       const kind = getLeadingCacheDirective(node.body.statements);
       if (kind) {
         const { line } = sourceFile.getLineAndCharacterOfPosition(node.getStart());
-        checkScope(node, kind, nodeName(node), line + 1, node.body.statements);
+        const name = nodeName(node);
+        checkScope(node, kind, name, line + 1, node.body.statements, slugify(name));
       }
     }
     ts.forEachChild(node, visitTop);
@@ -273,6 +291,20 @@ function scanSource(filePath, sourceText) {
   visitTop(sourceFile);
 
   return findings;
+}
+
+/**
+ * Turns a function/file name into a reasonable cacheTag() suggestion:
+ * "getUserDashboard" -> "get-user-dashboard", "(anonymous)" -> "anonymous".
+ */
+function slugify(input) {
+  const slug = input
+    .replace(/[()]/g, '')
+    .replace(/([a-z0-9])([A-Z])/g, '$1-$2')
+    .replace(/[^a-zA-Z0-9]+/g, '-')
+    .toLowerCase()
+    .replace(/^-+|-+$/g, '');
+  return slug || 'cache';
 }
 
 module.exports = { scanSource };

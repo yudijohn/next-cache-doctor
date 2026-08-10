@@ -1,6 +1,6 @@
 {
   "name": "next-cache-doctor",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Static analysis CLI for Next.js 'use cache' directive: catches missing cacheLife, potential private-data leaks in cached scopes, and missing cacheTag before they hit production.",
   "type": "commonjs",
   "main": "src/index.js",
