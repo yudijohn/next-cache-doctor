@@ -3,7 +3,8 @@
 const fs = require('fs');
 const path = require('path');
 const fg = require('fast-glob');
-const { scanSource, parseFileMeta } = require('./scanner');
+const { scanSource, parseFileMeta, collectTagUsageFromText } = require('./scanner');
+const unmatchedRevalidateTag = require('./rules/unmatched-revalidate-tag');
 
 const DEFAULT_IGNORE = [
   '**/node_modules/**',
@@ -91,20 +92,31 @@ async function runScan(targetDir, opts = {}) {
   const fileTexts = new Map();
   const registry = new Map();
   const resolveAlias = loadAliasResolver(cwd);
+  const globalCacheTagShapes = new Set();
+  const globalRevalidateCalls = []; // { file (abs), line, shape, displayText, calleeName }
+
   for (const absPath of entries) {
     const text = fs.readFileSync(absPath, 'utf8');
     fileTexts.set(absPath, text);
     try {
       registry.set(absPath, parseFileMeta(absPath, text));
+
+      // Tag usage (cacheTag / revalidateTag / updateTag) has to be
+      // collected from EVERY file, not just ones containing 'use cache' -
+      // a Server Action or Route Handler that calls revalidateTag()
+      // commonly has no cache scope of its own.
+      const { cacheTagShapes, revalidateCalls } = collectTagUsageFromText(absPath, text);
+      cacheTagShapes.forEach((shape) => globalCacheTagShapes.add(shape));
+      globalRevalidateCalls.push(...revalidateCalls);
     } catch (err) {
       // Unparseable file (e.g. a syntax error) - skip it for cross-file
-      // tracing purposes. If it also contains 'use cache' text, pass 2
-      // will surface the parse failure on its own.
+      // tracing and tag-matching purposes. If it also contains 'use cache'
+      // text, pass 2 will surface the parse failure on its own.
     }
   }
 
-  // Pass 2: actually run the rules, but only on files that mention
-  // 'use cache' at all (fast skip - most files in a project won't).
+  // Pass 2: actually run the per-scope rules, but only on files that
+  // mention 'use cache' at all (fast skip - most files in a project won't).
   let findings = [];
   let filesWithCache = 0;
 
@@ -118,6 +130,19 @@ async function runScan(targetDir, opts = {}) {
     }
     findings = findings.concat(fileFindings);
   }
+
+  // Pass 3: project-wide rules that can't be evaluated per-file, since they
+  // need to see every file's tag usage before they can judge any single
+  // call site. Convert absolute paths back to the same relative-path style
+  // used by the rest of the findings for consistent CLI output.
+  const projectFindings = unmatchedRevalidateTag.checkProject({
+    revalidateCalls: globalRevalidateCalls.map((call) => ({
+      ...call,
+      file: path.relative(cwd, call.file),
+    })),
+    cacheTagShapes: globalCacheTagShapes,
+  });
+  findings = findings.concat(projectFindings);
 
   return {
     findings,

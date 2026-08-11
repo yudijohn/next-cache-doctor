@@ -474,4 +474,80 @@ function slugify(input) {
   return slug || 'cache';
 }
 
-module.exports = { scanSource, parseFileMeta };
+/**
+ * Turns a string literal or template literal AST node into a "shape" string
+ * usable for matching a cacheTag() against a revalidateTag()/updateTag()
+ * even when the tag has an interpolated part, e.g. `product-${id}` and
+ * `product-${productId}` both normalize to the same shape ("product-\0"),
+ * so a tag defined in one file and revalidated with a differently-named
+ * variable elsewhere still matches correctly.
+ * Returns null for anything that isn't statically known (a plain
+ * identifier, a function call, string concatenation, etc.) - those are
+ * skipped rather than guessed at, to avoid false positives.
+ */
+function tagShape(node) {
+  if (ts.isStringLiteralLike(node)) return node.text;
+  if (ts.isTemplateExpression(node)) {
+    let shape = node.head.text;
+    for (const span of node.templateSpans) {
+      shape += '\u0000' + span.literal.text;
+    }
+    return shape;
+  }
+  return null;
+}
+
+/**
+ * Scans an entire file (not scoped to 'use cache' boundaries - cacheTag can
+ * only appear inside one, but revalidateTag/updateTag commonly live in
+ * Server Actions or Route Handlers that have no cache scope of their own)
+ * for tag usage, for the project-wide unmatched-revalidate-tag rule.
+ */
+function collectTagUsage(sourceFile, filePath) {
+  const cacheTagShapes = [];
+  const revalidateCalls = []; // { file, line, shape, displayText, calleeName }
+
+  function visit(node) {
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)) {
+      const callee = node.expression.text;
+      if (callee === 'cacheTag') {
+        for (const arg of node.arguments) {
+          const shape = tagShape(arg);
+          if (shape !== null) cacheTagShapes.push(shape);
+        }
+      } else if (callee === 'revalidateTag' || callee === 'updateTag') {
+        const firstArg = node.arguments[0];
+        if (firstArg) {
+          const shape = tagShape(firstArg);
+          if (shape !== null) {
+            const { line } = sourceFile.getLineAndCharacterOfPosition(node.getStart());
+            revalidateCalls.push({
+              file: filePath,
+              line: line + 1,
+              shape,
+              displayText: firstArg.getText(sourceFile),
+              calleeName: callee,
+            });
+          }
+        }
+      }
+    }
+    ts.forEachChild(node, visit);
+  }
+
+  ts.forEachChild(sourceFile, visit);
+  return { cacheTagShapes, revalidateCalls };
+}
+
+function collectTagUsageFromText(absPath, sourceText) {
+  const sourceFile = ts.createSourceFile(
+    absPath,
+    sourceText,
+    ts.ScriptTarget.Latest,
+    true,
+    absPath.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS
+  );
+  return collectTagUsage(sourceFile, absPath);
+}
+
+module.exports = { scanSource, parseFileMeta, collectTagUsage, collectTagUsageFromText };
