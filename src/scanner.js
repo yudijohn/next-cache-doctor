@@ -1,5 +1,6 @@
 'use strict';
 
+const path = require('path');
 const ts = require('typescript');
 const { rules } = require('./rules');
 
@@ -55,7 +56,7 @@ function nodeName(node) {
  * Stops descending into nested functions that declare their OWN
  * 'use cache' directive, since those are independent cache scopes.
  */
-function collectSignals(root, sourceFile, helpers) {
+function collectSignals(root, sourceFile, fileCtx, projectCtx) {
   const signals = {
     hasCacheLife: false,
     hasCacheTag: false,
@@ -83,15 +84,24 @@ function collectSignals(root, sourceFile, helpers) {
       if (callee === 'cookies' || callee === 'headers') {
         const { line } = sourceFile.getLineAndCharacterOfPosition(node.getStart());
         signals.dynamicApiCalls.push({ name: callee, line: line + 1 });
-      } else if (helpers.has(callee)) {
-        const result = bodyTouchesDynamicApi(helpers.get(callee), helpers, new Set([callee]));
-        if (result) {
-          const { line } = sourceFile.getLineAndCharacterOfPosition(node.getStart());
-          signals.dynamicApiCalls.push({
-            name: result.api,
-            line: line + 1,
-            viaChain: [callee, ...result.viaChain],
-          });
+      } else {
+        const resolved = resolveCalleeToBody(callee, fileCtx, projectCtx);
+        if (resolved) {
+          const crossedFile = resolved.fileCtx.absPath !== fileCtx.absPath ? resolved.fileCtx.absPath : null;
+          const result = bodyTouchesDynamicApi(
+            resolved.body,
+            resolved.fileCtx,
+            projectCtx,
+            new Set([`${fileCtx.absPath}::${callee}`])
+          );
+          if (result) {
+            const { line } = sourceFile.getLineAndCharacterOfPosition(node.getStart());
+            signals.dynamicApiCalls.push({
+              name: result.api,
+              line: line + 1,
+              viaChain: [{ name: callee, file: crossedFile }, ...result.viaChain],
+            });
+          }
         }
       }
     }
@@ -170,13 +180,135 @@ function collectTopLevelHelpers(sourceFile) {
 }
 
 /**
+ * Collects the names of top-level declarations that carry an `export`
+ * modifier - these are the only names another file could import.
+ */
+function collectExportedNames(sourceFile) {
+  const names = new Set();
+  for (const stmt of sourceFile.statements) {
+    const hasExportModifier = !!(
+      stmt.modifiers && stmt.modifiers.some((m) => m.kind === ts.SyntaxKind.ExportKeyword)
+    );
+    if (!hasExportModifier) continue;
+
+    if (ts.isFunctionDeclaration(stmt) && stmt.name) {
+      names.add(stmt.name.text);
+    } else if (ts.isVariableStatement(stmt)) {
+      for (const decl of stmt.declarationList.declarations) {
+        if (decl.name && ts.isIdentifier(decl.name)) names.add(decl.name.text);
+      }
+    }
+  }
+  return names;
+}
+
+/**
+ * Maps each locally-bound import name to where it came from:
+ * `import { getSession as gs } from './auth'` -> gs -> { importedName: 'getSession', modulePath: './auth' }
+ * `import auth from './auth'` -> auth -> { importedName: 'default', modulePath: './auth' }
+ * Namespace imports (`import * as ns`) are not tracked - a rare pattern for
+ * small helper functions, and out of scope for v1.
+ */
+function collectImportMap(sourceFile) {
+  const importMap = new Map();
+  for (const stmt of sourceFile.statements) {
+    if (!ts.isImportDeclaration(stmt) || !stmt.importClause) continue;
+    if (!ts.isStringLiteral(stmt.moduleSpecifier)) continue;
+    const modulePath = stmt.moduleSpecifier.text;
+    const clause = stmt.importClause;
+
+    if (clause.name) {
+      importMap.set(clause.name.text, { importedName: 'default', modulePath });
+    }
+    if (clause.namedBindings && ts.isNamedImports(clause.namedBindings)) {
+      for (const el of clause.namedBindings.elements) {
+        const importedName = el.propertyName ? el.propertyName.text : el.name.text;
+        importMap.set(el.name.text, { importedName, modulePath });
+      }
+    }
+  }
+  return importMap;
+}
+
+/**
+ * Resolves a relative import specifier (e.g. './auth') from `fromAbsPath`
+ * to an absolute path present in `registry`. Only relative imports are
+ * followed - bare package imports (npm packages) are not project files and
+ * are intentionally out of scope. Tries common extension/index fallbacks.
+ */
+function resolveRelativeImport(fromAbsPath, modulePath, registry) {
+  if (!modulePath.startsWith('.')) return null;
+  const base = path.resolve(path.dirname(fromAbsPath), modulePath);
+  const candidates = [
+    base,
+    `${base}.ts`,
+    `${base}.tsx`,
+    `${base}.js`,
+    `${base}.jsx`,
+    path.join(base, 'index.ts'),
+    path.join(base, 'index.tsx'),
+  ];
+  return candidates.find((c) => registry.has(c)) || null;
+}
+
+/**
+ * Parses one file into the lightweight metadata needed for cross-file
+ * tracing: its top-level function bodies (for same-file recursion once we
+ * land here), which of those are exported (importable by other files), and
+ * what it imports from where. Used to build a project-wide registry before
+ * any rule-checking happens, so files that don't themselves contain
+ * 'use cache' can still be traced into as helper modules.
+ */
+function parseFileMeta(absPath, sourceText) {
+  const sourceFile = ts.createSourceFile(
+    absPath,
+    sourceText,
+    ts.ScriptTarget.Latest,
+    true,
+    absPath.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS
+  );
+  return {
+    absPath,
+    allTopLevel: collectTopLevelHelpers(sourceFile),
+    exportedNames: collectExportedNames(sourceFile),
+    importMap: collectImportMap(sourceFile),
+  };
+}
+
+/**
+ * Given a callee name referenced inside `fileCtx`, finds where its body
+ * actually lives: a same-file top-level function, or - if a project
+ * registry is available - a function imported (transitively resolvable)
+ * from another local file. Returns null if it can't be resolved (e.g. an
+ * external library call, or a name we don't recognize).
+ */
+function resolveCalleeToBody(name, fileCtx, projectCtx) {
+  if (fileCtx.allTopLevel.has(name)) {
+    return { body: fileCtx.allTopLevel.get(name), fileCtx };
+  }
+  if (projectCtx && fileCtx.importMap.has(name)) {
+    const { importedName, modulePath } = fileCtx.importMap.get(name);
+    const resolvedPath = resolveRelativeImport(fileCtx.absPath, modulePath, projectCtx.registry);
+    if (resolvedPath) {
+      const target = projectCtx.registry.get(resolvedPath);
+      if (target && target.exportedNames.has(importedName) && target.allTopLevel.has(importedName)) {
+        return { body: target.allTopLevel.get(importedName), fileCtx: target };
+      }
+    }
+  }
+  return null;
+}
+
+/**
  * Walks a function body (Block or expression body) looking for a call to
  * cookies()/headers(), a reference to `searchParams`, or a call to another
- * known helper that itself (transitively) touches one of those. Returns
- * `{ api, viaChain }` describing what was found and the chain of helper
- * names that led to it, or `null` if the body is clean.
+ * known helper - same-file, or (with a project registry) imported from
+ * another local file - that itself (transitively) touches one of those.
+ * Returns `{ api, viaChain }` where viaChain is an array of
+ * `{ name, file }` describing the call path, or `null` if clean.
+ * `visited` guards against cycles, including across files.
  */
-function bodyTouchesDynamicApi(bodyNode, helpers, visited) {
+function bodyTouchesDynamicApi(bodyNode, fileCtx, projectCtx, visited) {
   let found = null;
 
   function visit(node) {
@@ -188,12 +320,20 @@ function bodyTouchesDynamicApi(bodyNode, helpers, visited) {
         found = { api: callee, viaChain: [] };
         return;
       }
-      if (helpers.has(callee) && !visited.has(callee)) {
-        visited.add(callee);
-        const nested = bodyTouchesDynamicApi(helpers.get(callee), helpers, visited);
-        if (nested) {
-          found = { api: nested.api, viaChain: [callee, ...nested.viaChain] };
-          return;
+      const visitKey = `${fileCtx.absPath}::${callee}`;
+      if (!visited.has(visitKey)) {
+        const resolved = resolveCalleeToBody(callee, fileCtx, projectCtx);
+        if (resolved) {
+          visited.add(visitKey);
+          const nested = bodyTouchesDynamicApi(resolved.body, resolved.fileCtx, projectCtx, visited);
+          if (nested) {
+            const crossedFile = resolved.fileCtx.absPath !== fileCtx.absPath ? resolved.fileCtx.absPath : null;
+            found = {
+              api: nested.api,
+              viaChain: [{ name: callee, file: crossedFile }, ...nested.viaChain],
+            };
+            return;
+          }
         }
       }
     }
@@ -214,7 +354,7 @@ function bodyTouchesDynamicApi(bodyNode, helpers, visited) {
  * Scans one file's source text and returns a list of findings.
  * Each finding: { file, line, rule, severity, message }
  */
-function scanSource(filePath, sourceText) {
+function scanSource(filePath, sourceText, projectCtx) {
   const findings = [];
   const sourceFile = ts.createSourceFile(
     filePath,
@@ -225,6 +365,8 @@ function scanSource(filePath, sourceText) {
   );
 
   const helpers = collectTopLevelHelpers(sourceFile);
+  const absPath = (projectCtx && projectCtx.absPath) || path.resolve(filePath);
+  const fileCtx = { absPath, allTopLevel: helpers, importMap: collectImportMap(sourceFile) };
 
   /** Shared insertion point: right after the directive prologue statement. */
   function directiveInsertionPoint(statements) {
@@ -255,7 +397,7 @@ function scanSource(filePath, sourceText) {
   };
 
   function checkScope(root, kind, name, line, statements, tagHint) {
-    const signals = collectSignals(root, sourceFile, helpers);
+    const signals = collectSignals(root, sourceFile, fileCtx, projectCtx);
     const ctx = { kind, name, line, signals };
 
     for (const rule of rules) {
@@ -307,4 +449,4 @@ function slugify(input) {
   return slug || 'cache';
 }
 
-module.exports = { scanSource };
+module.exports = { scanSource, parseFileMeta };

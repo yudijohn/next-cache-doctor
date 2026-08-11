@@ -13,7 +13,14 @@ const id = 'possible-private-data-leak';
 const severity = 'error';
 
 function formatChain(viaChain) {
-  return viaChain.map((n) => `${n}()`).join(' → ');
+  return viaChain
+    .map((step) => (step.file ? `${step.name}() [${basename(step.file)}]` : `${step.name}()`))
+    .join(' → ');
+}
+
+function basename(absPath) {
+  const parts = absPath.split(/[\\/]/);
+  return parts[parts.length - 1];
 }
 
 function check({ kind, name, signals }) {

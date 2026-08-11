@@ -78,7 +78,7 @@ Exit code is `1` if any error-level finding exists (or warning-level too, with `
 | Rule | Severity | What it catches |
 |---|---|---|
 | `missing-cache-life` | warning | A `'use cache'` scope with no `cacheLife(...)` call, so the duration is left implicit. Auto-fixable with `--fix`. |
-| `possible-private-data-leak` | error | A plain `'use cache'` scope (not `'use cache: private'`) that calls `cookies()`, `headers()`, or reads `searchParams` — directly, or through a same-file helper function it calls. |
+| `possible-private-data-leak` | error | A plain `'use cache'` scope (not `'use cache: private'`) that calls `cookies()`, `headers()`, or reads `searchParams` — directly, or through a helper function it calls, including helpers imported from another local file. |
 | `missing-cache-tag` | info | A `'use cache'` scope with no `cacheTag(...)`, so it can only be invalidated by waiting for expiry, not on-demand. Auto-fixable with `--fix`. |
 
 ## `--fix`
@@ -95,12 +95,12 @@ npx next-cache-doctor scan . --fix
 
 ## How it works
 
-`next-cache-doctor` parses each `.ts`/`.tsx` file with the TypeScript compiler API, finds functions/components/files whose body opens with a `'use cache'` directive prologue, and inspects each scope for the signals above. For the leak rule, it also builds a map of same-file top-level helper functions and recursively checks whether a function you call from inside a cache scope itself touches `cookies()`/`headers()`/`searchParams` — including through a chain of helpers (with cycle protection for mutual recursion). It does not execute your code and does not require your project to build.
+`next-cache-doctor` parses each `.ts`/`.tsx` file with the TypeScript compiler API, finds functions/components/files whose body opens with a `'use cache'` directive prologue, and inspects each scope for the signals above. For the leak rule, it builds a project-wide map of every file's top-level functions, exports, and imports first, then recursively checks whether a function you call from inside a cache scope itself touches `cookies()`/`headers()`/`searchParams` — following the call chain through same-file helpers and through helpers imported from other local files (relative imports only), with cycle protection for both same-file and cross-file recursion. It does not execute your code and does not require your project to build.
 
 ## Known limitations (v0.1)
 
 - Detection is name-based: it looks for calls to identifiers literally named `cacheLife`, `cacheTag`, `cookies`, `headers`. Re-exporting these under a different name will not be detected.
-- Helper-function tracing only follows functions declared in the **same file**. A helper imported from another module is not traced yet.
+- Cross-file helper tracing only follows **relative imports** (`./`, `../`) and only **named exports**. Bare/package imports (npm packages) are intentionally not followed - they're not your project's code. Default exports and namespace imports (`import * as ns`) are not tracked yet.
 - A helper function that itself opens its own `'use cache'`/`'use cache: private'` scope is treated as independently validated and is not traced into — which is correct, since it manages its own caching.
 - `--fix` covers `missing-cache-life` and `missing-cache-tag`. Suggested tag names are a starting point (derived from the function/file name) - rename them to match your actual invalidation strategy.
 
@@ -108,7 +108,7 @@ Contributions and bug reports are very welcome.
 
 ## Roadmap
 
-- Trace helper functions across file/module boundaries, not just same-file
+- Default-export and namespace-import (`import * as ns`) tracing for the leak rule
 - VS Code extension / inline devtools overlay showing cache boundaries at dev time
 
 ## License
