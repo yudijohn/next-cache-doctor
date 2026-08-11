@@ -15,6 +15,55 @@ const DEFAULT_IGNORE = [
 ];
 
 /**
+ * Reads tsconfig.json's `compilerOptions.paths` (the standard way Next.js
+ * projects configure import aliases like `@/*` -> `./*`) and returns a
+ * resolver function mapping an aliased specifier to an absolute base path,
+ * or null if there's no tsconfig / no usable `paths` entries. Only simple
+ * wildcard patterns ("prefix/*" -> "target/*") are supported - covers the
+ * overwhelming majority of real-world configs.
+ */
+function loadAliasResolver(cwd) {
+  const tsconfigPath = path.join(cwd, 'tsconfig.json');
+  if (!fs.existsSync(tsconfigPath)) return null;
+
+  let parsed;
+  try {
+    const raw = fs.readFileSync(tsconfigPath, 'utf8');
+    // tsconfig.json commonly allows comments (JSONC) - strip them defensively.
+    const stripped = raw
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/(^|[^:"])\/\/.*$/gm, '$1');
+    parsed = JSON.parse(stripped);
+  } catch (err) {
+    return null;
+  }
+
+  const compilerOptions = parsed.compilerOptions || {};
+  if (!compilerOptions.paths) return null;
+
+  const baseUrl = compilerOptions.baseUrl || '.';
+  const tsconfigDir = path.dirname(tsconfigPath);
+  const entries = [];
+  for (const [pattern, targets] of Object.entries(compilerOptions.paths)) {
+    if (!pattern.endsWith('/*') || !Array.isArray(targets) || !targets[0] || !targets[0].endsWith('/*')) {
+      continue; // exotic (non-wildcard) alias patterns are out of scope for v1
+    }
+    entries.push({ prefix: pattern.slice(0, -2), targetPrefix: targets[0].slice(0, -2) });
+  }
+  if (entries.length === 0) return null;
+
+  return function resolveAlias(specifier) {
+    for (const { prefix, targetPrefix } of entries) {
+      if (specifier === prefix || specifier.startsWith(`${prefix}/`)) {
+        const rest = specifier.slice(prefix.length);
+        return path.resolve(tsconfigDir, baseUrl, `${targetPrefix}${rest}`);
+      }
+    }
+    return null;
+  };
+}
+
+/**
  * Runs the scan against a target directory.
  * @param {string} targetDir
  * @param {{ ignore?: string[] }} [opts]
@@ -41,6 +90,7 @@ async function runScan(targetDir, opts = {}) {
   // into it.
   const fileTexts = new Map();
   const registry = new Map();
+  const resolveAlias = loadAliasResolver(cwd);
   for (const absPath of entries) {
     const text = fs.readFileSync(absPath, 'utf8');
     fileTexts.set(absPath, text);
@@ -62,7 +112,7 @@ async function runScan(targetDir, opts = {}) {
     const text = fileTexts.get(absPath);
     if (!text.includes('use cache')) continue;
     const relPath = path.relative(cwd, absPath);
-    const fileFindings = scanSource(relPath, text, { absPath, registry });
+    const fileFindings = scanSource(relPath, text, { absPath, registry, resolveAlias });
     if (fileFindings.length > 0 || text.match(/['"]use cache/)) {
       filesWithCache += 1;
     }

@@ -179,3 +179,60 @@ test('resolves an import without an explicit extension against a .ts file', asyn
     }
   );
 });
+
+test('resolves a tsconfig path alias import (e.g. "@/*" -> "./*") - the standard Next.js convention', async () => {
+  await withTempProject(
+    {
+      'tsconfig.json': `{
+        "compilerOptions": {
+          "paths": { "@/*": ["./*"] }
+        }
+      }`,
+      'features/auth/getSession.ts': `
+        import { cookies } from 'next/headers';
+        export function getSession() { return cookies().get('session')?.value; }
+      `,
+      'features/product/Product.tsx': `
+        import { cacheLife, cacheTag } from 'next/cache';
+        import { getSession } from '@/features/auth/getSession';
+
+        export async function getProductForUser() {
+          'use cache';
+          cacheLife('minutes');
+          cacheTag('product');
+          return db.find(getSession());
+        }
+      `,
+    },
+    async (dir) => {
+      const { findings } = await runScan(dir);
+      const errors = findings.filter((f) => f.severity === 'error');
+      assert.equal(errors.length, 1);
+      assert.match(errors[0].message, /getSession\(\) \[getSession\.ts\]/);
+    }
+  );
+});
+
+test('a project without tsconfig.json paths does not attempt alias resolution (no crash, no false positive)', async () => {
+  await withTempProject(
+    {
+      'features/product/Product.tsx': `
+        import { cacheLife, cacheTag } from 'next/cache';
+        import { getSession } from '@/features/auth/getSession';
+
+        export async function getProductForUser() {
+          'use cache';
+          cacheLife('minutes');
+          cacheTag('product');
+          return db.find(getSession());
+        }
+      `,
+    },
+    async (dir) => {
+      const { findings } = await runScan(dir);
+      // Can't resolve '@/...' without a tsconfig alias - should simply not
+      // trace into it, not crash and not false-positive.
+      assert.equal(findings.filter((f) => f.severity === 'error').length, 0);
+    }
+  );
+});

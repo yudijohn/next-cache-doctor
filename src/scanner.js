@@ -231,14 +231,10 @@ function collectImportMap(sourceFile) {
 }
 
 /**
- * Resolves a relative import specifier (e.g. './auth') from `fromAbsPath`
- * to an absolute path present in `registry`. Only relative imports are
- * followed - bare package imports (npm packages) are not project files and
- * are intentionally out of scope. Tries common extension/index fallbacks.
+ * Given a resolved base path (no extension), tries common TS/JS extension
+ * and index-file fallbacks and returns the one present in `registry`.
  */
-function resolveRelativeImport(fromAbsPath, modulePath, registry) {
-  if (!modulePath.startsWith('.')) return null;
-  const base = path.resolve(path.dirname(fromAbsPath), modulePath);
+function candidateExtensions(base, registry) {
   const candidates = [
     base,
     `${base}.ts`,
@@ -249,6 +245,34 @@ function resolveRelativeImport(fromAbsPath, modulePath, registry) {
     path.join(base, 'index.tsx'),
   ];
   return candidates.find((c) => registry.has(c)) || null;
+}
+
+/**
+ * Resolves a relative import specifier (e.g. './auth') from `fromAbsPath`
+ * to an absolute path present in `registry`.
+ */
+function resolveRelativeImport(fromAbsPath, modulePath, registry) {
+  if (!modulePath.startsWith('.')) return null;
+  const base = path.resolve(path.dirname(fromAbsPath), modulePath);
+  return candidateExtensions(base, registry);
+}
+
+/**
+ * Resolves an import specifier to an absolute file in the registry, trying
+ * (in order): a relative import (`./`, `../`), then - if the project has a
+ * tsconfig `paths` alias resolver (e.g. `@/*` -> `./*`, the most common
+ * Next.js convention) - an aliased import. Bare package imports (npm
+ * packages) resolve to null on both counts and are correctly left untraced.
+ */
+function resolveModuleSpecifier(fromAbsPath, modulePath, projectCtx) {
+  if (!projectCtx) return null;
+  const relative = resolveRelativeImport(fromAbsPath, modulePath, projectCtx.registry);
+  if (relative) return relative;
+  if (projectCtx.resolveAlias) {
+    const aliasedBase = projectCtx.resolveAlias(modulePath);
+    if (aliasedBase) return candidateExtensions(aliasedBase, projectCtx.registry);
+  }
+  return null;
 }
 
 /**
@@ -278,9 +302,10 @@ function parseFileMeta(absPath, sourceText) {
 /**
  * Given a callee name referenced inside `fileCtx`, finds where its body
  * actually lives: a same-file top-level function, or - if a project
- * registry is available - a function imported (transitively resolvable)
- * from another local file. Returns null if it can't be resolved (e.g. an
- * external library call, or a name we don't recognize).
+ * registry is available - a function imported (transitively resolvable,
+ * relatively or via a tsconfig path alias) from another local file. Returns
+ * null if it can't be resolved (e.g. an external library call, or a name we
+ * don't recognize).
  */
 function resolveCalleeToBody(name, fileCtx, projectCtx) {
   if (fileCtx.allTopLevel.has(name)) {
@@ -288,7 +313,7 @@ function resolveCalleeToBody(name, fileCtx, projectCtx) {
   }
   if (projectCtx && fileCtx.importMap.has(name)) {
     const { importedName, modulePath } = fileCtx.importMap.get(name);
-    const resolvedPath = resolveRelativeImport(fileCtx.absPath, modulePath, projectCtx.registry);
+    const resolvedPath = resolveModuleSpecifier(fileCtx.absPath, modulePath, projectCtx);
     if (resolvedPath) {
       const target = projectCtx.registry.get(resolvedPath);
       if (target && target.exportedNames.has(importedName) && target.allTopLevel.has(importedName)) {
