@@ -10,7 +10,7 @@ Static analysis CLI for Next.js's `'use cache'` directive (Next.js 15.2+ / 16 Ca
 Next.js 16 flipped caching from implicit to explicit: nothing is cached unless you opt in with `'use cache'`. That's great for control, but a few mistakes are easy to make and easy to miss in review:
 
 1. Forgetting `cacheLife(...)`, so the cache duration silently falls back to a default profile instead of being explicit at the call site.
-2. Calling `cookies()`, `headers()`, or reading `searchParams` **inside** a plain `'use cache'` scope — directly, *or indirectly through a helper function you call* — which can serve one user's cached data to a different user, because the cache key doesn't account for the request.
+2. Calling `cookies()`, `headers()`, or reading `searchParams` **inside** a plain `'use cache'` scope — directly, *or indirectly through a helper function you call*. Next.js enforces this itself with a hard `next-request-in-use-cache` error, following the call stack through helpers — but per [Next.js's own docs](https://nextjs.org/docs/app/getting-started/caching), it can pass `next build` and only surface once real traffic hits the route under `next start`. Catching it via static analysis means you don't have to exercise every code path to find out.
 3. Forgetting `cacheTag(...)`, so the only way to invalidate the cache is waiting for it to expire — no on-demand `revalidateTag()`.
 
 `next-cache-doctor` scans your codebase and flags all three, before they ship — and can auto-fix the easy case.
@@ -26,9 +26,11 @@ Scanned 42 file(s), 6 contain a 'use cache' scope.
 app/dashboard/page.tsx
    ERROR  L18  [possible-private-data-leak]
          "getUserDashboard" is cached with plain 'use cache' but calls getSession(),
-         which internally calls cookies(). This can leak per-user data across users.
-         Use 'use cache: private', or refactor to pass the value in as an argument
-         instead.
+         which internally calls cookies(). Next.js enforces this with a build/runtime
+         error (next-request-in-use-cache) - but it can pass 'next build' and only
+         surface once real traffic hits the route under 'next start'. Move the call
+         outside the cache scope and pass the value in as an argument, or use
+         'use cache: private'.
 
 app/products/actions.ts
    WARN   L4  [missing-cache-life]
@@ -78,7 +80,7 @@ Exit code is `1` if any error-level finding exists (or warning-level too, with `
 | Rule | Severity | What it catches |
 |---|---|---|
 | `missing-cache-life` | warning | A `'use cache'` scope with no `cacheLife(...)` call, so the duration is left implicit. Auto-fixable with `--fix`. |
-| `possible-private-data-leak` | error | A plain `'use cache'` scope (not `'use cache: private'`) that calls `cookies()`, `headers()`, or reads `searchParams` — directly, or through a helper function it calls, including helpers imported from another local file (relative imports or a `tsconfig.json` path alias like `@/*`). |
+| `possible-private-data-leak` | error | A plain `'use cache'` scope (not `'use cache: private'`) that calls `cookies()`, `headers()`, or reads `searchParams` — directly, or through a helper function it calls, including helpers imported from another local file (relative imports or a `tsconfig.json` path alias like `@/*`). Next.js enforces this itself at build/runtime; this rule catches it earlier and covers cases that can pass `next build` but fail once traffic hits the route. |
 | `missing-cache-tag` | info | A `'use cache'` scope with no `cacheTag(...)`, so it can only be invalidated by waiting for expiry, not on-demand. Auto-fixable with `--fix`. |
 
 ## `--fix`
